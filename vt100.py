@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """
+
+wch - modified from https://github.com/MarkLodato/vt100-parser
+
 NAME
 ====
 
@@ -162,6 +165,16 @@ DEC-compatible parser page.
 # Requires Python 2.6
 from __future__ import print_function
 
+
+#import PIL
+#from PIL import ImageFont
+#import PIL.Image
+#import PIL.ImageColor
+import PIL.ImageDraw
+import PIL.ImageFont
+
+import time
+
 __version__ = "0.4-git"
 __author__ = "Mark Lodato"
 
@@ -193,6 +206,7 @@ import os.path
 import re
 import subprocess
 import sys
+import io
 from optparse import OptionParser, OptionGroup
 try:
     from ConfigParser import SafeConfigParser as ConfigParser
@@ -401,10 +415,134 @@ class HtmlFormatter (TextFormatter):
     def end(self):
         return ['</pre>']
 
+# dang. I thought the html formatter was going to be the easy way out, but the 
+# unicode fixed width braille characters are...not the same width. the btop
+# display is ragged. OK. write a PNG formatter and make the characters be in
+# the write places. I already added the unicode input processing, so just need
+# a graphics library with unicode support.   wch ...
+# (I tried many mono fonts, and they are all bad in different ways.)
+# (SVG might work too, maybe smaller than PNG?)
+
+# (venv_a) 23:40 176 /var/www/forestcommons $ ls -haltr /usr/share/fonts/truetype/dejavu/
+# total 2.8M
+# -rw-r--r-- 1 root root 372K Jul 30  2016 DejaVuSerif.ttf
+# -rw-r--r-- 1 root root 348K Jul 30  2016 DejaVuSerif-Bold.ttf
+# -rw-r--r-- 1 root root 333K Jul 30  2016 DejaVuSansMono.ttf
+# -rw-r--r-- 1 root root 325K Jul 30  2016 DejaVuSansMono-Bold.ttf
+# -rw-r--r-- 1 root root 740K Jul 30  2016 DejaVuSans.ttf
+# -rw-r--r-- 1 root root 690K Jul 30  2016 DejaVuSans-Bold.ttf
+# drwxr-xr-x 3 root root 4.0K Apr  6  2024 ..
+# drwxr-xr-x 2 root root 4.0K Apr  6  2024 .
+# (venv_a) 23:40 176 /var/www/forestcommons $ 
+
+# https://stackoverflow.com/questions/16373425/add-text-on-image-using-pil
+
+""" the brute force svg might be 50 bytes per character; the png might be half the size and more reliable. this was a simple test ... I think it could work.
+    but it isn't quite right; the aspect ratio of the forced position characters is messed up, i don't understand the viewBox, still.
+    I'll have to deal with it in a png too. but it wont depend on a particular mono font on the browser.
+    GIF is 130K, PNG or JPG is 200K, estimate 500K for svg (160x80*50)
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>HTML 5 Boilerplate</title>
+    <link rel="stylesheet" href="style.css">
+	<link rel="stylesheet" href="/bower_components/dejavu-sans/css/dejavu-sans.css">
+  </head>
+  <body style="background-color: #808080; font-family: monospace;">
+
+
+<svg width="900px" height="600px" preserveAspectRatio="none" viewBox="0 0 80 60" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .small {
+      font: normal 0.8px monospace;
+fill: white;
+    }
+  </style>
+	<rect width="100%" height="100%" x="0" y="0" rx="1" ry="1" fill="black" />
+
+  <text x="0" y="1" class="small">(0,1)</text>
+  <text x="0,21,21.5,22,22.5,23,79.5" y="2" class="small">gbcdefg</text>
+  <text x="0" y="28" class="small">mmmmmimimiiiiimmmmmmiiiiimmmmmiiiixxxxxmmmmmiiiiiooooo.....gggggMMMMMXXXXX</text>
+  <text x="0" y="29" class="small">imimiiiiimmmmmmiiiiimmmmmiiiixxxxxmmmmmiiiiiooooo.....gggggMMMMMXXXXX</text>
+  <text x="0,21,21.5,22,22.5,23,79.5" y="30" class="small" >gb⣧├─┐g</text>
+  <text x="0,21,21.5,22,22.5,23,79.5" y="31"  class="small">Mm⣿ii│g</text>
+  <text x="0,21,21.5,22,22.5,23,79.5" y="32"  class="small">Mm⠻ii│g</text>
+  <text x="0,.5,1,1.5,2,2.5,3" y="33"  class="small">(0,bottom)123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890</text>
+  <text x="0" y="100%" dy="-1" class="small">.........1.........2.........3.........4.........5.........6.........7.........8.........9........10........11........12........13........14........15........16</text>
+  <text x="0" y="100%" class="small">(0,bottom)123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890</text>
+
+</svg>
+
+
+
+  </body>
+</html>
+"""
+
+class GifFormatter (HtmlFormatter): # reuse the color logic from HTML...it worked pretty well in a test...
+    def init(self):
+        super().init() # sets up some color tables, use config
+    def begin(self):
+        self.fontMain = PIL.ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 12) # 12(7x12 7x14| 7x15⣧)  18(11x17 11x20⣧ 11x21|)
+        #self.font = PIL.ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf", 12) # braille with serif?
+        self.fontBraille = PIL.ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12) 
+        self.fontBold = PIL.ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 12) 
+        self.cx, self.cy = self.fontMain.getsize("┼") # ─ is 9 wide, most are 7    ├ is 8 wide, 15 tall   │ is 15 tall   ┼ is 9x15
+        self.image = PIL.Image.new('RGB', (160*self.cx,60*self.cy), color=(0, 0, 0))
+        self.draw = PIL.ImageDraw.Draw(self.image)
+        self.y = 0 # track the row index because the format_line interface does not include it
+        #self.x = 0
+        # for x in range(160):
+        #     for y in range(60):
+        #         x0 = x * self.cx
+        #         y0 = y * self.cy
+        #         self.draw.rectangle([x0,y0,x0+self.cx,y0+self.cy],fill=(80,80,80))
+        #         self.draw.text((x0+1,y0),chr(ord('M')),(255,0,0),font=self.font)
+        #         self.draw.text((x0+1,y0),chr(ord('┼')),(0,255,255),font=self.font)
+        return ""
+    def end(self):
+       # self.image.save("image.gif", "GIF") the colors are generally good, sometimes visibly odd, orange rather than red...but it is 2/3 size of png
+        self.image.save("image.png", "PNG")
+        return ""
+    def format_line(self, line):
+        self.x = 0
+        #last_style = ''
+        for c in line:
+            if c:
+                #if len(c.attr) != 1:
+                #    print(c.attr) # {'fg_color': '#eeeeee', 'bg_color': '#000000', 'weight': 'bold', 'underline': 'single'}
+                color = c.attr["fg_color"]
+                if isinstance(color,int):
+                    style = self._compute_style(c.attr)
+                    # #background-color: #080808; color: #dadada; text-decoration: underline; font-weight: bold
+                    color = PIL.ImageColor.getrgb(style[34:41]) # crude, but good enough
+                else:
+                    color = PIL.ImageColor.getrgb(color)
+                char = c.char
+                if "\u2800" <= char and char <= "\u28ff": # for mysterious reasons, braille is not in mono font
+                    font=self.fontBraille
+                elif "weight" in c.attr:
+                    font=self.fontBold
+                else:
+                    font=self.fontMain
+
+                x0 = self.x * self.cx
+                y0 = self.y * self.cy
+#                self.draw.rectangle([x0,y0,x0+self.cx,y0+self.cy],fill=(40,40,40))
+                self.draw.text((x0+1,y0),char,color,font=font)
+
+                self.x += 1
+        self.y += 1
+        return "" # ''.join(out)
 
 formatters = {
         'text' : TextFormatter,
         'html' : HtmlFormatter,
+        'gif' : GifFormatter
         }
 
 
@@ -552,6 +690,8 @@ class Terminal:
         self.formatter = formatter
         self.main_screen = Screen(width, height)
         self.alt_screen = Screen(width, height)
+        self.acc = 0 # accumulator
+        self.need = 0
         self.reset()
 
     # ---------- Utilities ----------
@@ -681,8 +821,32 @@ class Terminal:
 
     def parse(self, s):
         """Parse an entire string."""
+        # wch - add a utf-8 multi byte coder for this byte stream; this code was apparently
+        # written for single byte per character encodings because it is testing 'c' as a
+        # character.
         for c in s:
-            self.parse_single(c)
+            if c < 128: # ascii 
+                self.parse_single(c)
+            else:
+                if c >= 128+64+32+16: # lead byte of 4-byte sequence
+                    assert self.need == 0
+                    self.need = 3
+                    self.acc = c & 7
+                elif c >= 128+64+32: # lead byte of 3-byte sequence
+                    assert self.need == 0
+                    self.need = 2
+                    self.acc = c & 15
+                elif c >= 128+64: # lead byte of 2-byte sequence
+                    assert self.need == 0
+                    self.need = 1
+                    self.acc = c & 31
+                elif c >= 128: # more bytes
+                    assert self.need > 0
+                    self.acc = (self.acc * 64) + (c & 63)
+                    self.need = self.need - 1
+                    if self.need == 0:
+                        self.parse_single(self.acc)
+
 
     def parse_single(self, c):
         """Parse a single character."""
@@ -727,7 +891,7 @@ class Terminal:
         if history:
             lines.extend(map(self.fixup_line, self.history))
         if screen:
-            lines.extend(map(self.fixup_line, self.main_screen))
+            lines.extend(map(self.fixup_line, self.alt_screen))
         if not lines:
             return
 
@@ -1309,6 +1473,7 @@ class Terminal:
             if n == 0:
                 self.attr.clear()
             elif 30 <= n <= 38 or 40 <= n <= 48:
+                # true color looks like f'\033[{dint};2;{r};{g};{b}m'
                 if n in (38, 48):
                     try:
                         m = next(l_iter)
@@ -1316,10 +1481,15 @@ class Terminal:
                     except StopIteration:
                         break
                     if m != 5:
-                        # xterm stops parsing if this happens
-                        self.debug(0, 'invalid 256-color attribute: %s %s %s' %
-                                (m,n,o))
-                        break
+                        if m == 2: # wch true color
+                            p = next(l_iter)
+                            q = next(l_iter)
+                            o = '#'+format(o, '02x')+format(p, '02x')+format(q, '02x')
+                        else:
+                            # xterm stops parsing if this happens
+                            self.debug(0, 'invalid 256-color attribute: %s %s %s' %
+                                    (m,n,o))
+                            break
                     value = o
                 else:
                     value = n % 10
@@ -2436,14 +2606,15 @@ class SimpleConfigParser (ConfigParser):
 
 
 def main():
+    #sys.stdout = io.TextIOWrapper(sys.stdout.buffer,encoding='utf8')
 
     usage = "%prog [OPTIONS] [-f FORMAT] [-g WxH] (filename|-)"
     version = "%%prog %s" % __version__
     parser = OptionParser(usage=usage, version=version)
     parser.add_option('--man', action='store_true', default=False,
             help='show the manual page and exit')
-    parser.add_option('-f', '--format', choices=('text','html'),
-            help='output format.  Choices: text, html')
+    parser.add_option('-f', '--format', choices=('text','html','gif'),
+            help='output format.  Choices: text, html, gif')
     parser.add_option('-g', '--geometry', metavar='WxH',
             help='use W columns and H rows in output, or "detect"')
     parser.add_option('--non-script', action='store_true', default=False,
@@ -2495,17 +2666,6 @@ def main():
     if len(args) != 1:
         parser.error('missing required filename argument')
     filename, = args
-    if filename == '-':
-        if hasattr(sys.stdin, 'buffer'):
-            # Python 3: Read in binary mode
-            text = sys.stdin.buffer.read()
-        else:
-            # Python 2: Technically we should be reading in binary mode on
-            # Windows, but that's too difficult. This works on Linux at least.
-            text = sys.stdin.read()
-    else:
-        with open(filename, 'rb') as f:
-            text = f.read()
 
     if options.format is None:
         options.format = config.get(None, 'format')
@@ -2522,11 +2682,30 @@ def main():
             parser.error('invalid format for --geometry: %s' % options.geometry)
 
     t = Terminal(verbosity=options.verbose, formatter=formatter,
-                 width=cols, height=rows)
-    if not options.non_script:
-        text = remove_script_lines(text)
-    t.parse(text)
-    print(t.to_string(), end='')
+                width=cols, height=rows)
+
+    while True: # needs work, this is for the infinite stream on stdin
+        if filename == '-':
+            if hasattr(sys.stdin, 'buffer'):
+                # Python 3: Read in binary mode
+                text = sys.stdin.buffer.read(10000)
+                #text = text.decode('cp437')
+            else:
+                # Python 2: Technically we should be reading in binary mode on
+                # Windows, but that's too difficult. This works on Linux at least.
+                text = sys.stdin.read()
+        else:
+            with open(filename, 'rb') as f:
+                text = f.read()
+
+        if not options.non_script:
+            text = remove_script_lines(text)
+        t.parse(text)
+
+        #print(
+        t.to_string() # drives the output file generation
+        #, end='')
+
 
 
 if __name__ == "__main__":
