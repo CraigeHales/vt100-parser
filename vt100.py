@@ -495,9 +495,9 @@ class GifFormatter (HtmlFormatter): # reuse the color logic from HTML...it worke
         #self.font = PIL.ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf", 12) # braille with serif?
         self.fontBraille = PIL.ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12) 
         self.fontBold = PIL.ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 12) 
-        self.cx, self.cy = self.fontMain.getsize("┼") # ─ is 9 wide, most are 7    ├ is 8 wide, 15 tall   │ is 15 tall   ┼ is 9x15
-        self.cx = self.cx - 2 # was 9
-        self.cy = self.cy - 1 # was 15
+        left, top, right, bottom = self.fontMain.getbbox("┼") # (-1, 0, 8, 15)
+        self.cx = right - 1
+        self.cy = bottom - 1
         self.image = PIL.Image.new('RGB', (self.cols*self.cx,self.rows*self.cy), color=(0, 0, 0))
         self.draw = PIL.ImageDraw.Draw(self.image)
         self.y = 0 # track the row index because the format_line interface does not include it
