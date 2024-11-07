@@ -174,6 +174,7 @@ import PIL.ImageDraw
 import PIL.ImageFont
 
 import time
+import threading
 
 __version__ = "0.4-git"
 __author__ = "Mark Lodato"
@@ -230,8 +231,11 @@ if sys.version_info[0] == 2:
 class TextFormatter:
     """Terminal formatter for plain text output."""
 
-    def __init__(self, config=None, eol='\n'):
+    def __init__(self, config=None, eol='\n', rows=None, cols=None, path=None):
         self.eol = eol
+        self.path = path
+        self.rows = rows
+        self.cols = cols
         self.init()
         if config is not None:
             self.parse_config(config)
@@ -492,7 +496,9 @@ class GifFormatter (HtmlFormatter): # reuse the color logic from HTML...it worke
         self.fontBraille = PIL.ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12) 
         self.fontBold = PIL.ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 12) 
         self.cx, self.cy = self.fontMain.getsize("┼") # ─ is 9 wide, most are 7    ├ is 8 wide, 15 tall   │ is 15 tall   ┼ is 9x15
-        self.image = PIL.Image.new('RGB', (160*self.cx,60*self.cy), color=(0, 0, 0))
+        self.cx = self.cx - 2 # was 9
+        self.cy = self.cy - 1 # was 15
+        self.image = PIL.Image.new('RGB', (self.cols*self.cx,self.rows*self.cy), color=(0, 0, 0))
         self.draw = PIL.ImageDraw.Draw(self.image)
         self.y = 0 # track the row index because the format_line interface does not include it
         #self.x = 0
@@ -506,7 +512,7 @@ class GifFormatter (HtmlFormatter): # reuse the color logic from HTML...it worke
         return ""
     def end(self):
        # self.image.save("image.gif", "GIF") the colors are generally good, sometimes visibly odd, orange rather than red...but it is 2/3 size of png
-        self.image.save("image.png", "PNG")
+        self.image.save(self.path, self.path[-3:]) # expect png/gif/jpg
         return ""
     def format_line(self, line):
         self.x = 0
@@ -533,7 +539,7 @@ class GifFormatter (HtmlFormatter): # reuse the color logic from HTML...it worke
                 x0 = self.x * self.cx
                 y0 = self.y * self.cy
 #                self.draw.rectangle([x0,y0,x0+self.cx,y0+self.cy],fill=(40,40,40))
-                self.draw.text((x0+1,y0),char,color,font=font)
+                self.draw.text((x0,y0),char,color,font=font)
 
                 self.x += 1
         self.y += 1
@@ -544,6 +550,8 @@ formatters = {
         'html' : HtmlFormatter,
         'gif' : GifFormatter
         }
+formatters['png']=formatters['gif']
+formatters['jpg']=formatters['gif']
 
 
 class Character:
@@ -823,29 +831,63 @@ class Terminal:
         """Parse an entire string."""
         # wch - add a utf-8 multi byte coder for this byte stream; this code was apparently
         # written for single byte per character encodings because it is testing 'c' as a
-        # character.
+        # character. https://en.wikipedia.org/wiki/UTF-8 -- U+uvwxyz
+
+        #   Code point ↔ UTF-8 conversion 
+        #   First code point 	Last code point 	Byte 1  	Byte 2  	Byte 3  	Byte 4
+        #   U+0000 	            U+007F 	            0yyyzzzz 	
+        #   U+0080 	            U+07FF 	            110xxxyy 	10yyzzzz 	
+        #   U+0800 	            U+FFFF 	            1110wwww 	10xxxxyy 	10yyzzzz 	
+        #   U+010000 	        U+10FFFF 	        11110uvv 	10vvwwww 	10xxxxyy 	10yyzzzz
+
         for c in s:
-            if c < 128: # ascii 
+
+            if c < 128: # 1-byte ascii 0xxx xxxx
                 self.parse_single(c)
+
+            elif c < 128+64: # more bytes 10xx xxxx
+                assert self.need > 0 # a valid stream has a lead-in before continuation bytes
+                self.acc = (self.acc * 64) + (c & 63)
+                self.need = self.need - 1
+                if self.need == 0:
+                    self.parse_single(self.acc)
+
+            elif c < 128+64+32: # 2-byte lead-in 110x xxyy
+                assert self.need == 0 # a valid stream won't get another lead-in before the last one is used up
+                self.need = 1
+                self.acc = c & 31
+
+            elif c < 128+64+32+16: # 3-byte lead-in 1110 wwww
+                assert self.need == 0 # ditto
+                self.need = 2
+                self.acc = c & 15
+
+            elif c < 128+64+32+16+8: # 4-byte lead-in 1111 0uvv
+                assert self.need == 0 # ditto
+                self.need = 3
+                self.acc = c & 7
+
             else:
-                if c >= 128+64+32+16: # lead byte of 4-byte sequence
-                    assert self.need == 0
-                    self.need = 3
-                    self.acc = c & 7
-                elif c >= 128+64+32: # lead byte of 3-byte sequence
-                    assert self.need == 0
-                    self.need = 2
-                    self.acc = c & 15
-                elif c >= 128+64: # lead byte of 2-byte sequence
-                    assert self.need == 0
-                    self.need = 1
-                    self.acc = c & 31
-                elif c >= 128: # more bytes
-                    assert self.need > 0
-                    self.acc = (self.acc * 64) + (c & 63)
-                    self.need = self.need - 1
-                    if self.need == 0:
-                        self.parse_single(self.acc)
+                assert False # malformed, 1111 1xxx can't be in stream
+
+                # if c >= 128+64+32+16: # lead byte of 4-byte sequence
+                #     assert self.need == 0
+                #     self.need = 3
+                #     self.acc = c & 7
+                # elif c >= 128+64+32: # lead byte of 3-byte sequence
+                #     assert self.need == 0
+                #     self.need = 2
+                #     self.acc = c & 15
+                # elif c >= 128+64: # lead byte of 2-byte sequence
+                #     assert self.need == 0
+                #     self.need = 1
+                #     self.acc = c & 31
+                # elif c >= 128: # more bytes
+                #     assert self.need > 0
+                #     self.acc = (self.acc * 64) + (c & 63)
+                #     self.need = self.need - 1
+                #     if self.need == 0:
+                #         self.parse_single(self.acc)
 
 
     def parse_single(self, c):
@@ -2604,6 +2646,27 @@ class SimpleConfigParser (ConfigParser):
             section = self.initial_section
         return ConfigParser.set(self, section, *args, **kwargs)
 
+"""
+wch - the stdin read is blocking. Use a thread to make a non blocking reader.
+      that thread should push the bytes into the parser.
+      actually, let the main program loop in current form, just
+      remove the call to the pic generator to a thread that wakes
+      up periodically.
+"""
+
+
+class GeneratePictures(threading.Thread):
+    def __init__(self, semaphore, terminal, seconds):
+        self.semaphore = semaphore
+        self.terminal = terminal
+        self.seconds = seconds
+        threading.Thread.__init__(self)
+    def run(self):
+        while True:
+            time.sleep(self.seconds)
+            self.semaphore.acquire()
+            self.terminal.to_string() # drives the output file generation
+            self.semaphore.release()
 
 def main():
     #sys.stdout = io.TextIOWrapper(sys.stdout.buffer,encoding='utf8')
@@ -2613,8 +2676,8 @@ def main():
     parser = OptionParser(usage=usage, version=version)
     parser.add_option('--man', action='store_true', default=False,
             help='show the manual page and exit')
-    parser.add_option('-f', '--format', choices=('text','html','gif'),
-            help='output format.  Choices: text, html, gif')
+    parser.add_option('-f', '--format', choices=('text','html','png','gif','jpg'),
+            help='output format.  Choices: text, html, png, gif, jpg')
     parser.add_option('-g', '--geometry', metavar='WxH',
             help='use W columns and H rows in output, or "detect"')
     parser.add_option('--non-script', action='store_true', default=False,
@@ -2636,6 +2699,11 @@ def main():
     html_group.add_option('--colorscheme', metavar='SCHEME',
             help='use the given color scheme')
     parser.add_option_group(html_group)
+
+
+    parser.add_option("--freq", type="int", default=10) 
+    parser.add_option('--path', default='./delete_me_bpytop.png')
+
 
     options, args = parser.parse_args()
 
@@ -2669,7 +2737,8 @@ def main():
 
     if options.format is None:
         options.format = config.get(None, 'format')
-    formatter = formatters[options.format](config=config)
+    if options.path[-3:] not in formatters:
+        raise Exception("bad extension, must be gif,png,jpg, on " + options.path)
 
     if options.geometry is None:
         options.geometry = config.get(None, 'geometry')
@@ -2681,29 +2750,38 @@ def main():
         except:
             parser.error('invalid format for --geometry: %s' % options.geometry)
 
+    formatter = formatters[options.format](config=config, path=options.path, rows=rows, cols=cols)
+
     t = Terminal(verbosity=options.verbose, formatter=formatter,
                 width=cols, height=rows)
+    
+    s = threading.Semaphore() # the semaphore keeps the parser from updating while the bitmap is generating
+    g = GeneratePictures( s, t, options.freq)
+    g.start()
 
     while True: # needs work, this is for the infinite stream on stdin
         if filename == '-':
             if hasattr(sys.stdin, 'buffer'):
                 # Python 3: Read in binary mode
-                text = sys.stdin.buffer.read(10000)
+                text = sys.stdin.buffer.read(20000)
                 #text = text.decode('cp437')
             else:
+                assert False # untested
                 # Python 2: Technically we should be reading in binary mode on
                 # Windows, but that's too difficult. This works on Linux at least.
                 text = sys.stdin.read()
         else:
+            assert False # untested
             with open(filename, 'rb') as f:
                 text = f.read()
 
         if not options.non_script:
             text = remove_script_lines(text)
+        s.acquire()
         t.parse(text)
-
+        s.release()
         #print(
-        t.to_string() # drives the output file generation
+        #t.to_string() # drives the output file generation
         #, end='')
 
 
