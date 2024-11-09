@@ -231,9 +231,9 @@ if sys.version_info[0] == 2:
 class TextFormatter:
     """Terminal formatter for plain text output."""
 
-    def __init__(self, config=None, eol='\n', rows=None, cols=None, path=None):
+    def __init__(self, config=None, eol='\n', rows=None, cols=None, extension=None):
         self.eol = eol
-        self.path = path
+        self.extension = extension
         self.rows = rows
         self.cols = cols
         self.init()
@@ -490,14 +490,18 @@ fill: white;
 class GifFormatter (HtmlFormatter): # reuse the color logic from HTML...it worked pretty well in a test...
     def init(self):
         super().init() # sets up some color tables, use config
+    
+    def __del__(self):
+        print("vt100 GifFormatter removed")
+
     def begin(self):
         self.fontMain = PIL.ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 12) # 12(7x12 7x14| 7x15⣧)  18(11x17 11x20⣧ 11x21|)
         #self.font = PIL.ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf", 12) # braille with serif?
         self.fontBraille = PIL.ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12) 
         self.fontBold = PIL.ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 12) 
-        self.cx, self.cy = self.fontMain.getsize("┼") # ─ is 9 wide, most are 7    ├ is 8 wide, 15 tall   │ is 15 tall   ┼ is 9x15
-        self.cx = self.cx - 2 # was 9
-        self.cy = self.cy - 1 # was 15
+        left, top, right, bottom = self.fontMain.getbbox("┼") # (-1, 0, 8, 15)
+        self.cx = right - 1
+        self.cy = bottom - 1
         self.image = PIL.Image.new('RGB', (self.cols*self.cx,self.rows*self.cy), color=(0, 0, 0))
         self.draw = PIL.ImageDraw.Draw(self.image)
         self.y = 0 # track the row index because the format_line interface does not include it
@@ -510,10 +514,22 @@ class GifFormatter (HtmlFormatter): # reuse the color logic from HTML...it worke
         #         self.draw.text((x0+1,y0),chr(ord('M')),(255,0,0),font=self.font)
         #         self.draw.text((x0+1,y0),chr(ord('┼')),(0,255,255),font=self.font)
         return ""
+
+
     def end(self):
        # self.image.save("image.gif", "GIF") the colors are generally good, sometimes visibly odd, orange rather than red...but it is 2/3 size of png
-        self.image.save(self.path, self.path[-3:]) # expect png/gif/jpg
+       # self.image.save(self.path, self.path[-3:]) # expect png/gif/jpg
+
+
+        with io.BytesIO() as buf:
+            self.image.save(buf, format=self.extension)
+            buf.seek(0)
+            # 9-byte length prefix
+            sys.stdout.buffer.write(f"{buf.getbuffer().nbytes:09d}".encode())
+            sys.stdout.buffer.write(buf.read())
         return ""
+
+
     def format_line(self, line):
         self.x = 0
         #last_style = ''
@@ -551,7 +567,7 @@ formatters = {
         'gif' : GifFormatter
         }
 formatters['png']=formatters['gif']
-formatters['jpg']=formatters['gif']
+formatters['JPEG']=formatters['gif']
 
 
 class Character:
@@ -701,6 +717,9 @@ class Terminal:
         self.acc = 0 # accumulator
         self.need = 0
         self.reset()
+    
+    def __del__(self):
+        print("vt100 Terminal removed") 
 
     # ---------- Utilities ----------
 
@@ -2676,8 +2695,8 @@ def main():
     parser = OptionParser(usage=usage, version=version)
     parser.add_option('--man', action='store_true', default=False,
             help='show the manual page and exit')
-    parser.add_option('-f', '--format', choices=('text','html','png','gif','jpg'),
-            help='output format.  Choices: text, html, png, gif, jpg')
+    parser.add_option('-f', '--format', choices=('text','html','png','gif','JPEG'),
+            help='output format.  Choices: text, html, png, gif, JPEG')
     parser.add_option('-g', '--geometry', metavar='WxH',
             help='use W columns and H rows in output, or "detect"')
     parser.add_option('--non-script', action='store_true', default=False,
@@ -2702,7 +2721,7 @@ def main():
 
 
     parser.add_option("--freq", type="int", default=10) 
-    parser.add_option('--path', default='./delete_me_bpytop.png')
+    #parser.add_option('--path', default='./delete_me_bpytop.png')
 
 
     options, args = parser.parse_args()
@@ -2737,8 +2756,8 @@ def main():
 
     if options.format is None:
         options.format = config.get(None, 'format')
-    if options.path[-3:] not in formatters:
-        raise Exception("bad extension, must be gif,png,jpg, on " + options.path)
+    if options.format not in formatters:
+        raise Exception("bad extension, must be gif,png,JPEG, on " + options.path)
 
     if options.geometry is None:
         options.geometry = config.get(None, 'geometry')
@@ -2750,7 +2769,7 @@ def main():
         except:
             parser.error('invalid format for --geometry: %s' % options.geometry)
 
-    formatter = formatters[options.format](config=config, path=options.path, rows=rows, cols=cols)
+    formatter = formatters[options.format](config=config, extension=options.format, rows=rows, cols=cols)
 
     t = Terminal(verbosity=options.verbose, formatter=formatter,
                 width=cols, height=rows)
